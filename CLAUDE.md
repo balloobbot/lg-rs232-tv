@@ -62,3 +62,11 @@ PDF analysed: https://www.proaudioinc.com/Dealer_Area/RS232.pdf
 (LG OWNER'S MANUAL - EXTERNAL CONTROL DEVICE SETUP, EM9600/LM/LS series).
 The LG help page at lg.com/ca_en/support links to it but does not include the
 command list inline.
+
+## AI policy
+
+This project follows the [Open Home Foundation AI Policy](AI_POLICY.md).
+Autonomous contributions are not accepted: a human must review, understand,
+and be able to explain every change before it is submitted. Do not open
+issues or pull requests autonomously, and do not post comments on behalf of
+a user without their review.
