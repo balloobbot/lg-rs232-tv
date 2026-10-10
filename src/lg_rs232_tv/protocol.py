@@ -68,7 +68,9 @@ def encode_command(command1: str, command2: str, set_id: int, data: str) -> byte
         raise ValueError("command1 and command2 must each be a single character")
     if not 0 <= set_id <= 99:
         raise ValueError(f"set_id out of range: {set_id}")
-    return f"{command1}{command2} {set_id:02d} {data}\r".encode("ascii")
+    # The TV menu shows the set ID in decimal, but the protocol sends it in
+    # hex (0x00..0x63), the same way the TV reports it in its replies.
+    return f"{command1}{command2} {set_id:02x} {data}\r".encode("ascii")
 
 
 def parse_response(message: str) -> Response:

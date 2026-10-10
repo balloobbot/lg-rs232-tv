@@ -93,6 +93,21 @@ async def test_subscribe(tv, mock_serial) -> None:
     unsub()
 
 
+async def test_connect_with_set_id_above_9(mock_serial) -> None:
+    """The set ID is sent in hex and matched against the hex reply."""
+    mock_serial.responses["ka 0a ff"] = "01"
+    tv = LGTV("/dev/ttyUSB0", set_id=10)
+
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    with patch("lg_rs232_tv.tv.serialx.open_serial_connection", side_effect=fake_open):
+        await tv.connect()
+
+    assert tv.state.power is PowerState.ON
+    await tv.disconnect()
+
+
 async def test_query_power_off(tv, mock_serial) -> None:
     mock_serial.responses["ka 01 ff"] = "00"
     power = await tv.query_power()
