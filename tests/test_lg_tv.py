@@ -41,6 +41,30 @@ async def test_connect_raises_when_tv_does_not_respond(mock_serial) -> None:
             await tv.connect()
 
 
+async def test_connect_does_not_log_api_key(
+    mock_serial, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The API key in an ESPHome proxy URL stays out of logs and errors."""
+    mock_serial.responses["ka 01 ff"] = "01"
+    tv = LGTV("esphome://192.168.1.2/?port_name=TTL&key=SECRET")
+
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    caplog.set_level("INFO")
+    with patch("lg_rs232_tv.tv.serialx.open_serial_connection", side_effect=fake_open):
+        await tv.connect()
+        await tv.disconnect()
+
+        mock_serial.responses["ka 01 ff"] = "NG:ff"
+        with pytest.raises(TVNotRespondingError) as exc_info:
+            await tv.connect()
+
+    assert "esphome://192.168.1.2/" in caplog.text
+    assert "SECRET" not in caplog.text
+    assert "SECRET" not in str(exc_info.value)
+
+
 async def test_query_state_populates_everything(tv) -> None:
     await tv.query_state()
     s = tv.state
@@ -52,6 +76,28 @@ async def test_query_state_populates_everything(tv) -> None:
     assert s.brightness == 50
     assert s.osd_enabled is True
     assert s.remote_lock is False
+
+
+async def test_picture_mode_reply_split_across_reads(tv, mock_serial) -> None:
+    """A dx reply starts with 'x', the terminator, and may arrive in parts."""
+    mock_serial.responses.pop("dx 01 ff")
+
+    def handler(_cmd: str) -> None:
+        mock_serial.feed("x 01 OK0")
+        asyncio.get_running_loop().call_later(0.01, mock_serial.feed, "1x")
+
+    mock_serial.command_handler = handler
+    assert (await tv.query_picture_mode()).value == "01"
+
+
+async def test_read_buffer_is_bounded(tv, mock_serial) -> None:
+    """Noise without an 'x' must not grow the read buffer without limit."""
+    mock_serial.feed("0" * 10_000)
+    await asyncio.sleep(0)
+
+    # The buffer is local to the read loop.
+    assert len(tv._read_task.get_coro().cr_frame.f_locals["buf"]) <= 64
+    await tv.query_power()
 
 
 async def test_set_volume_sends_correct_command(tv, mock_serial) -> None:
@@ -94,6 +140,21 @@ async def test_subscribe(tv, mock_serial) -> None:
     assert received  # got at least one notification
     assert received[-1].volume == 50
     unsub()
+
+
+async def test_connect_with_set_id_above_9(mock_serial) -> None:
+    """The set ID is sent in hex and matched against the hex reply."""
+    mock_serial.responses["ka 0a ff"] = "01"
+    tv = LGTV("/dev/ttyUSB0", set_id=10)
+
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    with patch("lg_rs232_tv.tv.serialx.open_serial_connection", side_effect=fake_open):
+        await tv.connect()
+
+    assert tv.state.power is PowerState.ON
+    await tv.disconnect()
 
 
 async def test_query_power_off(tv, mock_serial) -> None:

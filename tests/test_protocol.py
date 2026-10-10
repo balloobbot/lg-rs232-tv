@@ -19,6 +19,8 @@ from lg_rs232_tv import (
 def test_encode_command() -> None:
     assert encode_command("k", "a", 1, "ff") == b"ka 01 ff\r"
     assert encode_command("x", "b", 2, "90") == b"xb 02 90\r"
+    assert encode_command("k", "a", 10, "ff") == b"ka 0a ff\r"
+    assert encode_command("k", "a", 99, "ff") == b"ka 63 ff\r"
 
 
 def test_encode_command_invalid() -> None:

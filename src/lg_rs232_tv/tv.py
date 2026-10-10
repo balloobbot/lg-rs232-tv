@@ -64,6 +64,10 @@ class LGTVConnectionError(ConnectionError):
 # command2 alone (the LG protocol does not echo command1).
 _QUERY_DATA = "ff"
 
+# Longest partial response the read loop keeps while it waits for the rest.
+# Real replies are much shorter; this bounds the buffer when noise arrives.
+_MAX_RESPONSE_LENGTH = 64
+
 # Known status-query commands attempted during ``query_state()``. Each entry is
 # (command1, command2, state_attr, parser). Parsers are pulled from local
 # methods on LGTV at runtime so they can update enum-typed fields cleanly.
@@ -111,6 +115,9 @@ class LGTV:
         set_id: int = DEFAULT_SET_ID,
     ) -> None:
         self._port = port
+        # An ESPHome proxy URL can carry its API key in the query string, so
+        # logs and error messages show the port without it.
+        self._safe_port = port.split("?", 1)[0]
         self._set_id = set_id
         self._reader: asyncio.StreamReader | None = None
         self._writer: serialx.SerialStreamWriter | None = None
@@ -176,7 +183,7 @@ class LGTV:
         except TimeoutError:
             await self.disconnect()
             raise TVNotRespondingError(
-                f"No response from LG TV on {self._port}: the TV did not "
+                f"No response from LG TV on {self._safe_port}: the TV did not "
                 "reply to a power query within "
                 f"{COMMAND_TIMEOUT}s. Check that the TV is on the bus, the "
                 "cable is wired correctly (TX/RX may be swapped), the set "
@@ -185,14 +192,14 @@ class LGTV:
         except CommandRejected as err:
             await self.disconnect()
             raise TVNotRespondingError(
-                f"LG TV on {self._port} responded with NG to power query: {err}"
+                f"LG TV on {self._safe_port} responded with NG to power query: {err}"
             ) from None
         except BaseException:
             # Also on cancellation, so the port and read task do not leak.
             await self._teardown()
             raise
 
-        _LOGGER.info("Connected to LG TV on %s", self._port)
+        _LOGGER.info("Connected to LG TV on %s", self._safe_port)
 
     async def disconnect(self) -> None:
         """Close the serial connection."""
@@ -584,11 +591,12 @@ class LGTV:
             while True:
                 match = self._RESPONSE_PATTERN.search(buf)
                 if match is None:
-                    # Trim noise from the front but keep tail in case the
-                    # next read completes a response.
-                    if ACK_TERMINATOR in buf:
-                        # Discard everything up through the stray 'x'
-                        buf = buf.split(ACK_TERMINATOR, 1)[1]
+                    # Trim noise from the front but keep the tail in case the
+                    # next read completes a response. A response cannot start
+                    # before the last 'x': inside a response, 'x' is only its
+                    # command2 (e.g. "x 01 OK01x" for dx) or its terminator.
+                    start = buf.rfind(ACK_TERMINATOR)
+                    buf = buf[max(start, len(buf) - _MAX_RESPONSE_LENGTH, 0) :]
                     break
                 message = match.group(0)[:-1].decode("ascii", errors="replace")
                 buf = buf[match.end() :]
