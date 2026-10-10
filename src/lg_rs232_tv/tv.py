@@ -110,6 +110,9 @@ class LGTV:
         set_id: int = DEFAULT_SET_ID,
     ) -> None:
         self._port = port
+        # An ESPHome proxy URL can carry its API key in the query string, so
+        # logs and error messages show the port without it.
+        self._safe_port = port.split("?", 1)[0]
         self._set_id = set_id
         self._reader: asyncio.StreamReader | None = None
         self._writer: serialx.SerialStreamWriter | None = None
@@ -172,7 +175,7 @@ class LGTV:
         except TimeoutError:
             await self.disconnect()
             raise TVNotRespondingError(
-                f"No response from LG TV on {self._port}: the TV did not "
+                f"No response from LG TV on {self._safe_port}: the TV did not "
                 "reply to a power query within "
                 f"{COMMAND_TIMEOUT}s. Check that the TV is on the bus, the "
                 "cable is wired correctly (TX/RX may be swapped), the set "
@@ -181,14 +184,14 @@ class LGTV:
         except CommandRejected as err:
             await self.disconnect()
             raise TVNotRespondingError(
-                f"LG TV on {self._port} responded with NG to power query: {err}"
+                f"LG TV on {self._safe_port} responded with NG to power query: {err}"
             ) from None
         except BaseException:
             # Also on cancellation, so the port and read task do not leak.
             await self._teardown()
             raise
 
-        _LOGGER.info("Connected to LG TV on %s", self._port)
+        _LOGGER.info("Connected to LG TV on %s", self._safe_port)
 
     async def disconnect(self) -> None:
         """Close the serial connection."""
