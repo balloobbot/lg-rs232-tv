@@ -5,6 +5,9 @@ from enum import Enum
 BAUD_RATE = 9600
 COMMAND_TIMEOUT = 2.0  # seconds to wait for a response
 INTER_COMMAND_DELAY = 0.05  # seconds to wait between commands
+# Seconds a command waits after a command with the same command2 timed out,
+# so a late reply to the timed-out command is dropped instead of answering it.
+LATE_RESPONSE_WINDOW = 1.0
 CR = b"\r"
 ACK_TERMINATOR = b"x"  # responses end with the literal character 'x'
 

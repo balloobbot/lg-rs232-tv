@@ -174,6 +174,28 @@ async def test_query_only_queries_requested_attributes(tv, mock_serial) -> None:
     assert tv.state.volume == 30
 
 
+async def test_late_reply_not_credited_to_next_command(tv, mock_serial) -> None:
+    """Contrast (kg) and backlight (mg) replies both start with 'g'."""
+    mock_serial.responses.pop("kg 01 ff")
+    mock_serial.responses.pop("mg 01 ff")
+    loop = asyncio.get_running_loop()
+
+    def handler(cmd: str) -> None:
+        if cmd == "kg 01 ff":
+            # Contrast 10, but only after the query timed out.
+            loop.call_later(0.15, mock_serial.feed, "g 01 OK0ax")
+        else:
+            # Backlight 80.
+            loop.call_later(0.08, mock_serial.feed, "g 01 OK50x")
+
+    mock_serial.command_handler = handler
+
+    with pytest.raises(TimeoutError):
+        await tv.query_contrast()
+    assert await tv.query_backlight() == 80
+    assert tv.state.backlight == 80
+
+
 async def test_query_notifies_subscribers_once(tv, mock_serial) -> None:
     received: list = []
     tv.subscribe(received.append)

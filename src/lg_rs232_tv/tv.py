@@ -15,6 +15,7 @@ from .const import (
     COMMAND_TIMEOUT,
     CR,
     DEFAULT_SET_ID,
+    LATE_RESPONSE_WINDOW,
     AspectRatio,
     ColorTemperature,
     EnergySaving,
@@ -125,6 +126,9 @@ class LGTV:
         self._state = TVState()
         self._subscribers: list[StateCallback] = []
         self._pending: list[PendingCommand] = []
+        # Loop time per command2 until which a late reply to a timed-out
+        # command may still arrive.
+        self._late_response_deadlines: dict[str, float] = {}
         self._write_lock = asyncio.Lock()
         self._connected = False
         self._batching = False
@@ -449,11 +453,21 @@ class LGTV:
         command1: str,
         command2: str,
         data: str,
-        timeout: float = COMMAND_TIMEOUT,
     ) -> Response:
+        """Send a command and return its reply.
+
+        A reply is credited to the oldest pending command with the same
+        command2, since replies do not carry command1. After a timeout, the
+        next command with that command2 waits until ``LATE_RESPONSE_WINDOW``
+        has passed before it writes. A late reply that arrives in that window
+        finds no pending command and is dropped.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = self._late_response_deadlines.get(command2, 0.0)
+        if (delay := deadline - loop.time()) > 0:
+            await asyncio.sleep(delay)
         if not self._connected or self._writer is None:
             raise LGTVConnectionError("Not connected")
-        loop = asyncio.get_running_loop()
         future: asyncio.Future[Response] = loop.create_future()
         pending = PendingCommand(
             command2=command2,
@@ -478,7 +492,13 @@ class LGTV:
                 raise LGTVConnectionError(
                     f"Error writing to serial port: {err}"
                 ) from err
-            response = await asyncio.wait_for(future, timeout=timeout)
+            try:
+                response = await asyncio.wait_for(future, timeout=COMMAND_TIMEOUT)
+            except TimeoutError:
+                self._late_response_deadlines[command2] = (
+                    loop.time() + LATE_RESPONSE_WINDOW
+                )
+                raise
         finally:
             if pending in self._pending:
                 self._pending.remove(pending)

@@ -15,6 +15,7 @@ from lg_rs232_tv import LGTV
 # Speed up tests
 lg_rs232_tv.COMMAND_TIMEOUT = 0.1
 lg_tv_module.COMMAND_TIMEOUT = 0.1
+lg_tv_module.LATE_RESPONSE_WINDOW = 0.1
 
 
 # Each entry maps "command-as-sent" (e.g. "ka 01 ff") to the response data
