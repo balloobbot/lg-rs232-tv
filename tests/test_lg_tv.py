@@ -38,6 +38,30 @@ async def test_connect_raises_when_tv_does_not_respond(mock_serial) -> None:
             await tv.connect()
 
 
+async def test_connect_does_not_log_api_key(
+    mock_serial, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The API key in an ESPHome proxy URL stays out of logs and errors."""
+    mock_serial.responses["ka 01 ff"] = "01"
+    tv = LGTV("esphome://192.168.1.2/?port_name=TTL&key=SECRET")
+
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    caplog.set_level("INFO")
+    with patch("lg_rs232_tv.tv.serialx.open_serial_connection", side_effect=fake_open):
+        await tv.connect()
+        await tv.disconnect()
+
+        mock_serial.responses["ka 01 ff"] = "NG:ff"
+        with pytest.raises(TVNotRespondingError) as exc_info:
+            await tv.connect()
+
+    assert "esphome://192.168.1.2/" in caplog.text
+    assert "SECRET" not in caplog.text
+    assert "SECRET" not in str(exc_info.value)
+
+
 async def test_query_state_populates_everything(tv) -> None:
     await tv.query_state()
     s = tv.state
