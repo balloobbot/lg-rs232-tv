@@ -78,6 +78,28 @@ async def test_query_state_populates_everything(tv) -> None:
     assert s.remote_lock is False
 
 
+async def test_picture_mode_reply_split_across_reads(tv, mock_serial) -> None:
+    """A dx reply starts with 'x', the terminator, and may arrive in parts."""
+    mock_serial.responses.pop("dx 01 ff")
+
+    def handler(_cmd: str) -> None:
+        mock_serial.feed("x 01 OK0")
+        asyncio.get_running_loop().call_later(0.01, mock_serial.feed, "1x")
+
+    mock_serial.command_handler = handler
+    assert (await tv.query_picture_mode()).value == "01"
+
+
+async def test_read_buffer_is_bounded(tv, mock_serial) -> None:
+    """Noise without an 'x' must not grow the read buffer without limit."""
+    mock_serial.feed("0" * 10_000)
+    await asyncio.sleep(0)
+
+    # The buffer is local to the read loop.
+    assert len(tv._read_task.get_coro().cr_frame.f_locals["buf"]) <= 64
+    await tv.query_power()
+
+
 async def test_set_volume_sends_correct_command(tv, mock_serial) -> None:
     mock_serial.responses["kf 01 19"] = "19"
     await tv.set_volume(25)

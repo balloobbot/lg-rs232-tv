@@ -63,6 +63,10 @@ class LGTVConnectionError(ConnectionError):
 # command2 alone (the LG protocol does not echo command1).
 _QUERY_DATA = "ff"
 
+# Longest partial response the read loop keeps while it waits for the rest.
+# Real replies are much shorter; this bounds the buffer when noise arrives.
+_MAX_RESPONSE_LENGTH = 64
+
 # Known status-query commands attempted during ``query_state()``. Each entry is
 # (command1, command2, state_attr, parser). Parsers are pulled from local
 # methods on LGTV at runtime so they can update enum-typed fields cleanly.
@@ -567,11 +571,12 @@ class LGTV:
             while True:
                 match = self._RESPONSE_PATTERN.search(buf)
                 if match is None:
-                    # Trim noise from the front but keep tail in case the
-                    # next read completes a response.
-                    if ACK_TERMINATOR in buf:
-                        # Discard everything up through the stray 'x'
-                        buf = buf.split(ACK_TERMINATOR, 1)[1]
+                    # Trim noise from the front but keep the tail in case the
+                    # next read completes a response. A response cannot start
+                    # before the last 'x': inside a response, 'x' is only its
+                    # command2 (e.g. "x 01 OK01x" for dx) or its terminator.
+                    start = buf.rfind(ACK_TERMINATOR)
+                    buf = buf[max(start, len(buf) - _MAX_RESPONSE_LENGTH, 0) :]
                     break
                 message = match.group(0)[:-1].decode("ascii", errors="replace")
                 buf = buf[match.end() :]
