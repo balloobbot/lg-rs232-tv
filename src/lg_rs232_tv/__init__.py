@@ -39,7 +39,13 @@ from .protocol import (
     percent_to_data,
 )
 from .state import TVState
-from .tv import LGTV, QUERYABLE_ATTRIBUTES, StateCallback, TVNotRespondingError
+from .tv import (
+    LGTV,
+    QUERYABLE_ATTRIBUTES,
+    LGTVConnectionError,
+    StateCallback,
+    TVNotRespondingError,
+)
 
 __all__ = [
     "ACK_TERMINATOR",
@@ -55,6 +61,7 @@ __all__ = [
     "ISMMethod",
     "InputSource",
     "LGTV",
+    "LGTVConnectionError",
     "LegacyInputSource",
     "MAX_PERCENT",
     "MAX_VOLUME",

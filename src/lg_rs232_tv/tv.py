@@ -54,6 +54,11 @@ class TVNotRespondingError(ConnectionError):
     failure (the port itself being unreachable).
     """
 
+
+class LGTVConnectionError(ConnectionError):
+    """Raised when the serial connection is not open or is lost."""
+
+
 # Each entry maps a (command1, command2) pair. The response is identified by
 # command2 alone (the LG protocol does not echo command1).
 _QUERY_DATA = "ff"
@@ -109,6 +114,7 @@ class LGTV:
         self._reader: asyncio.StreamReader | None = None
         self._writer: serialx.SerialStreamWriter | None = None
         self._read_task: asyncio.Task | None = None
+        self._teardown_task: asyncio.Task | None = None
         self._state = TVState()
         self._subscribers: list[StateCallback] = []
         self._pending: list[PendingCommand] = []
@@ -131,20 +137,35 @@ class LGTV:
         return self._set_id
 
     def subscribe(self, callback: StateCallback) -> Callable[[], None]:
-        """Subscribe to state changes; returns an unsubscribe callable."""
+        """Subscribe to state changes; returns an unsubscribe callable.
+
+        Calling the unsubscribe callable more than once is a no-op.
+        """
         self._subscribers.append(callback)
-        return lambda: self._subscribers.remove(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
 
     # -- Connection lifecycle ------------------------------------------------
 
     async def connect(self) -> None:
-        """Open the serial connection and verify by querying power."""
+        """Open the serial connection and verify by querying power.
+
+        Raises ``RuntimeError`` if already connected. Call ``disconnect()``
+        first to reconnect.
+        """
+        if self._connected:
+            raise RuntimeError("Already connected")
         self._reader, self._writer = await serialx.open_serial_connection(
             self._port,
             baudrate=BAUD_RATE,
         )
         self._connected = True
         self._read_task = asyncio.create_task(self._read_loop())
+        self._read_task.add_done_callback(self._on_read_task_done)
 
         try:
             await self.query_power()
@@ -162,6 +183,10 @@ class LGTV:
             raise TVNotRespondingError(
                 f"LG TV on {self._port} responded with NG to power query: {err}"
             ) from None
+        except BaseException:
+            # Also on cancellation, so the port and read task do not leak.
+            await self._teardown()
+            raise
 
         _LOGGER.info("Connected to LG TV on %s", self._port)
 
@@ -419,8 +444,8 @@ class LGTV:
         data: str,
         timeout: float = COMMAND_TIMEOUT,
     ) -> Response:
-        if self._writer is None:
-            raise ConnectionError("Not connected")
+        if not self._connected or self._writer is None:
+            raise LGTVConnectionError("Not connected")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Response] = loop.create_future()
         pending = PendingCommand(
@@ -436,10 +461,16 @@ class LGTV:
                 async with self._write_lock:
                     self._writer.write(msg)
                     await self._writer.drain()
-            except Exception:
+            except Exception as err:
                 _LOGGER.exception("Error writing to serial port")
+                # Nobody awaits the future once the write fails, so do not let
+                # _teardown() fail it.
+                if pending in self._pending:
+                    self._pending.remove(pending)
                 await self._teardown()
-                raise
+                raise LGTVConnectionError(
+                    f"Error writing to serial port: {err}"
+                ) from err
             response = await asyncio.wait_for(future, timeout=timeout)
         finally:
             if pending in self._pending:
@@ -450,34 +481,55 @@ class LGTV:
         return response
 
     async def _teardown(self) -> None:
+        """Tear down the connection.
+
+        The reader, writer and read task are dropped before anything is
+        awaited, so a failure while closing cannot leave a dead stream behind
+        for later commands to write to.
+        """
         if not self._connected:
             return
         self._connected = False
 
-        current = asyncio.current_task()
-        if self._read_task is not None and self._read_task is not current:
-            self._read_task.cancel()
+        read_task, self._read_task = self._read_task, None
+        writer, self._writer = self._writer, None
+        self._reader = None
+
+        # The TV can no longer answer, so fail the commands in flight now
+        # instead of letting them run into COMMAND_TIMEOUT.
+        pending_commands, self._pending = self._pending, []
+        for pending in pending_commands:
+            if not pending.future.done():
+                pending.future.set_exception(LGTVConnectionError("Connection lost"))
+
+        if read_task is not None and read_task is not asyncio.current_task():
+            read_task.cancel()
             try:
-                await self._read_task
+                await read_task
             except asyncio.CancelledError:
                 pass
-        self._read_task = None
 
-        if self._writer is not None:
-            self._writer.close()
+        if writer is not None:
             try:
-                await self._writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
             except Exception:
-                pass
-            self._writer = None
-            self._reader = None
-
-        for pending in self._pending:
-            if not pending.future.done():
-                pending.future.set_exception(ConnectionError("Connection lost"))
-        self._pending.clear()
+                # The transport is already gone (e.g. the ESPHome proxy lost
+                # its API connection); there is nothing left to clean up.
+                _LOGGER.debug("Error closing serial port", exc_info=True)
 
         self._notify_subscribers()
+
+    def _on_read_task_done(self, task: asyncio.Task) -> None:
+        """Tear down the connection if the read loop died with an error."""
+        if task.cancelled() or (err := task.exception()) is None:
+            return
+        _LOGGER.error("Read loop failed", exc_info=err)
+        if self._read_task is not task:
+            return
+        # _teardown() would await the task and re-raise its error.
+        self._read_task = None
+        self._teardown_task = asyncio.get_running_loop().create_task(self._teardown())
 
     # Match a single complete response in the buffer:
     #   [c2] [setid] (OK|NG)[data]x
@@ -490,11 +542,12 @@ class LGTV:
     )
 
     async def _read_loop(self) -> None:
-        assert self._reader is not None
+        reader = self._reader
+        assert reader is not None
         buf = b""
         while self._connected:
             try:
-                data = await self._reader.read(256)
+                data = await reader.read(256)
             except Exception:
                 if not self._connected:
                     return

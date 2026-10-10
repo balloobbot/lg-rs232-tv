@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
+from conftest import DEFAULT_RESPONSES, MockSerialConnection
 
 from lg_rs232_tv import (
     AspectRatio,
     InputSource,
     LGTV,
+    LGTVConnectionError,
     PowerState,
     RemoteKey,
     ScreenMute,
@@ -133,3 +136,133 @@ async def test_query_clears_unanswered_attributes(tv, mock_serial) -> None:
     assert tv.state.volume == 30  # still answered, unchanged
     assert tv.state.balance is None  # stale value cleared
     assert received[-1].balance is None
+
+
+async def _connect(tv: LGTV, mock_serial: MockSerialConnection) -> None:
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    with patch("lg_rs232_tv.tv.serialx.open_serial_connection", side_effect=fake_open):
+        await tv.connect()
+
+
+def _break_transport(mock_serial: MockSerialConnection) -> OSError:
+    """Make the mock transport behave like a serial link that has gone away.
+
+    Writes fail, and so does ``wait_closed()``: serialx re-raises the error
+    that broke the connection when the stream is closed afterwards.
+    """
+    err = OSError(5, "ESPHome API connection closed")
+    mock_serial.writer.write.side_effect = err
+    mock_serial.writer.wait_closed.side_effect = err
+    return err
+
+
+async def test_write_error_tears_down(tv, mock_serial) -> None:
+    received: list = []
+    tv.subscribe(received.append)
+    err = _break_transport(mock_serial)
+
+    with pytest.raises(LGTVConnectionError) as exc_info:
+        await tv.power_on()
+    assert exc_info.value.__cause__ is err
+
+    assert not tv.connected
+    assert received == [None]
+
+    # Later commands fail fast instead of writing to the dead stream again.
+    mock_serial.writer.write.reset_mock()
+    with pytest.raises(LGTVConnectionError, match="Not connected"):
+        await tv.power_on()
+    mock_serial.writer.write.assert_not_called()
+
+
+async def test_link_loss_fails_command_in_flight(tv, mock_serial) -> None:
+    mock_serial.responses.pop("kf 01 ff")
+    mock_serial.command_handler = lambda _cmd: mock_serial.reader.feed_eof()
+
+    with pytest.raises(LGTVConnectionError, match="Connection lost"):
+        await tv.query(["volume"])
+    assert not tv.connected
+
+
+async def test_reconnect_after_link_loss(tv, mock_serial) -> None:
+    _break_transport(mock_serial)
+    with pytest.raises(LGTVConnectionError):
+        await tv.power_on()
+
+    fresh = MockSerialConnection()
+    fresh.responses = dict(DEFAULT_RESPONSES)
+    await _connect(tv, fresh)
+
+    assert tv.connected
+    fresh.responses["ka 01 00"] = "00"
+    await tv.power_off()
+    assert tv.state.power is PowerState.OFF
+
+
+async def test_connect_when_connected_raises(tv, mock_serial) -> None:
+    """A second connect() must not replace and leak the open connection."""
+    with (
+        patch("lg_rs232_tv.tv.serialx.open_serial_connection") as mock_open,
+        pytest.raises(RuntimeError, match="Already connected"),
+    ):
+        await tv.connect()
+
+    mock_open.assert_not_called()
+    mock_serial.writer.close.assert_not_called()
+    assert tv.connected
+    await tv.query_power()
+
+
+async def test_connect_cleans_up_on_unexpected_error(mock_serial) -> None:
+    mock_serial.responses["ka 01 ff"] = "05"  # not a known power state
+    tv = LGTV("/dev/ttyUSB0")
+
+    with pytest.raises(ValueError):
+        await _connect(tv, mock_serial)
+
+    assert not tv.connected
+    mock_serial.writer.close.assert_called_once()
+
+
+async def test_connect_cleans_up_on_cancel(mock_serial) -> None:
+    tv = LGTV("/dev/ttyUSB0")
+    task = asyncio.create_task(_connect(tv, mock_serial))
+    while not mock_serial.written:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not tv.connected
+    mock_serial.writer.close.assert_called_once()
+
+
+async def test_read_loop_crash_tears_down(
+    tv, mock_serial, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unexpected error in the read loop disconnects instead of hanging."""
+    disconnected = asyncio.Event()
+    tv.subscribe(lambda state: state is None and disconnected.set())
+
+    with patch.object(tv, "_handle_message", side_effect=RuntimeError("boom")):
+        mock_serial.feed("a 01 OK01x")
+        await disconnected.wait()
+
+    assert not tv.connected
+    assert "Read loop failed" in caplog.text
+    mock_serial.writer.close.assert_called_once()
+
+
+async def test_unsubscribe_twice_is_noop(tv, mock_serial) -> None:
+    received: list = []
+    unsubscribe = tv.subscribe(received.append)
+
+    unsubscribe()
+    unsubscribe()
+
+    mock_serial.responses["ka 01 00"] = "00"
+    await tv.power_off()
+    assert received == []

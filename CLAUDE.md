@@ -43,6 +43,10 @@ tests/
 - Each command method has matching `set_*` and `query_*` (where queryable).
 - `set_*` methods raise `CommandRejected` on NG; OK responses also update state.
 - `subscribe(callback)` notifies on every state change and `None` on disconnect.
+- `LGTVConnectionError` (a `ConnectionError`) means the link is not open or
+  was lost: not connected, a failed write, or a teardown while a command
+  waits for its response. `connect()` raises `RuntimeError` when already
+  connected.
 - The CLI's `--diagnose` mode opens the port raw (no `connect()` verify) and
   broadcasts power queries to set IDs 0..99 — useful when the cable wiring or
   the TV's set ID is unknown.
